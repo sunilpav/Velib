@@ -1,0 +1,192 @@
+#prerequis: avoir les 2 tables 
+#stations-velib-disponibilites-en-temps-reel.csv
+#data_all_Paris.jjson.txt
+
+#instalation des différentes librairie
+install.packages("FactoMineR")
+install.packages("jsonlite")
+install.packages("reshape")
+install.packages("fastcluster")
+install.packages("cluster")
+
+library(FactoMineR)
+library(jsonlite)
+library(reshape)
+library(fastcluster)
+library(cluster)
+library(ggplot2)
+library(ggmap)
+
+#PROJET MONUMENTalVELIB
+#Participants: Laurent Camus - Severine Castor - Sunil Pavitrin - Maxime Ponsart
+#V1: atelier R 31/01
+#humeur des participants: 
+setwd("C:/Users/sevdr/Desktop/data scientist/Projet velib")
+velib2<-read.csv("stations-velib-disponibilites-en-temps-reel.csv",
+                 sep=";")
+names(velib2)
+hist(velib2$bike_stands,freq=FALSE,xlab="Taille",main="Hist. de la taille des stations")
+lines(density(velib2$bike_stands),lwd=2,col=2)
+position <- as.character(velib2$position)
+vecteur <- do.call('rbind',strsplit(position,',',fixed=TRUE))
+velib2$longitude <- as.numeric(vecteur[,2])
+velib2$latitude <- as.numeric(vecteur[,1])
+rm(vecteur,position)
+
+# on applique le fonction FROMJSON a chaque doc JSON, pour les transformer en DataFrame
+
+Histo_velib <- readLines(file("C:/Users/sevdr/Desktop/data scientist/Projet velib/data_all_Paris.jjson.txt"))
+Histo_velib <- lapply(Histo_velib,jsonlite::fromJSON)
+# pour obtenir un dataFrame de toutes les dataFrame
+HistoDT <- do.call('rbind',Histo_velib)
+
+HistoDT$date <- as.POSIXct(HistoDT$download_date, origin="1970-01-01")
+HistoDT$jour<- weekdays(as.Date(HistoDT$date))
+HistoDT$mois<- months(as.Date(HistoDT$date))
+
+serie<-within(HistoDT,date<-data.frame(do.call('rbind',strsplit(as.character(date),' ',fixed=T))))
+
+serie<-within(serie,date$X2<-data.frame(do.call('rbind',strsplit(as.character(date$X2),':',fixed=T))))
+
+serie$heure<- serie$date$X2$X1
+serie$minutes<- serie$date$X2$X2
+serie$secondes<- serie$date$X2$X3
+Histo_nov<- serie[,!colnames(serie)=="date"]
+
+velib<-subset(velib2,select=c("number", "name","latitude","longitude"))
+location<- merge(velib,Histo_nov, by="number")
+
+rm(serie,HistoDT,Histo_velib,Histo_nov) 
+
+#Histo_nov$heure1 <-as.numeric(as.character(Histo_nov$heure))
+#Histo_nov$minutes1 <-as.numeric(as.character(Histo_nov$minutes))
+
+#if (Histo_nov$minutes1>="31") TT = 1 
+
+# moyenne des velo disponible par jour et station
+
+available_bikes_pct<-location$available_bikes/location$bike_stands
+location <-cbind(location,available_bikes_pct)
+rm(available_bikes_pct)
+
+moy_heure<- aggregate(available_bikes ~ name+heure,
+                      location, 
+                      FUN=mean,
+                      na.rm=T)
+
+moy_heure_prtc<- aggregate(available_bikes_pct ~ name+heure,
+                           location, 
+                           FUN=mean,
+                           na.rm=T)
+
+moy_heure_jour_prtc<- aggregate(available_bikes_pct ~ name+heure+jour,
+                                location, 
+                                FUN=mean,
+                                na.rm=T)
+
+
+moy_heure_jour<- aggregate(available_bikes ~ name+heure+jour,
+                           location, 
+                           FUN=mean,
+                           na.rm=T)
+
+#transformation de la table pour faire l'ACP
+
+tab_heure_prtc<-cast(moy_heure_prtc, name~heure,value= "available_bikes_pct")
+tab_heure <-cast(moy_heure , name  ~ heure,value= "available_bikes")
+tab_heure_jour <-cast(moy_heure_jour ,name+jour~heure, value= "available_bikes")
+tab_heure_jour_prtc <-cast(moy_heure_jour_prtc ,name+jour~heure, value= "available_bikes_pct")
+tab_heure_jour<- tab_heure_jour[which(tab_heure_jour$jour=="lundi"), 
+                         c("name","07","09","10","16","17","18","19")]
+
+#ACP pour les heures 
+
+
+ACP<-PCA(tab_heure[,2:25])
+ACP
+attributes(ACP)
+#les valeurs propres
+val_prop<-ACP$eig$eigenvalue
+val_prop
+#
+cp <- 1:length(val_prop)
+vp <- data.frame(cp=cp,val_prop=val_prop)
+
+#représentation des valeurs propres
+plot(vp$cp,vp$val_prop,type="h",lwd=30,lend="butt",
+     xlab="Composantes principales",ylab="Valeurs propres",main="Eboulis des valeurs propres")
+
+#cercle de corrélation
+plot.PCA(ACP,shadow=TRUE,cex=0.8,axes=c(1,2),choix="var",
+         new.plot=TRUE,title="Cercle des corrélations")
+
+#représenation des individus
+plot.PCA(ACP,shadow=TRUE,cex=0.8,axes=c(1,2),choix="ind",label="ind",new.plot=TRUE,
+         title="Projection des individus : avec les libellés des individus")
+
+#CAH
+
+dist <- dist(tab_heure[,2:25],method="euclidean")
+cah <- fastcluster::hclust(dist,method="ward.D")
+cah$names$labels
+attributes(cah)
+
+plot(as.dendrogram(cah),main="Ward")
+plot(sort(cah$height,decreasing=TRUE),type="h",xlim=c(1,50),ylab="Hauteur",main="Ward")
+
+classes <- cutree(cah,k=3) #parametre a changer le nombre de classe
+tab_heure_graph<- merge(tab_heure,velib, by="name")
+#création de la variable classe dans les données initial
+
+tab_heure_graph$classe=cutree(cah,k=3)
+
+map.Decaux <- get_map(c(lon=2.35,lat=48.86), zoom =12,  maptype = "roadmap")
+ggmap(map.Decaux)
+map.Decaux <- ggmap(map.Decaux, extent = "device")
+map.Decaux + geom_point(data = tab_heure_graph, aes(x = longitude, y = latitude))
+map.Decaux + geom_point(
+  data = tab_heure_graph, aes(x = longitude,
+                              y = latitude,color=factor(tab_heure_graph$classe)
+  ))+
+  scale_colour_manual(
+    values = c("1" = "red","2" = "blue","3" = "green"))
+
+
+#K MEANS
+km <- kmeans(tab_heure[,2:25],centers=100,iter=100)
+plot(km$centers)
+dist <- dist(km$centers,method="euclidean")
+cah <- fastcluster::hclust(dist,method="ward.D")
+plot(as.dendrogram(cah),main="Ward")
+plot(sort(cah$height,decreasing=TRUE),type="h",xlim=c(1,50),ylab="Hauteur",main="Ward")
+
+
+k <- 2:15
+res <- k
+for(i in k){
+  km=kmeans(tab_heure[,2:25],centers=i,nstart=20)
+  res[i-1]=km$betweenss/km$totss*100
+}
+
+plot(k,res,type="h",lwd=20,lend="butt",xlab="Nombre de clusters",ylab="Part d'inertie expliquée")
+
+
+km <- kmeans(tab_heure[,2:25],centers=4)
+names(km)
+km
+tab_heure_graph$classe=km$cluster
+
+
+#représentation graphique des données  (ajout de la couleur par classe)
+map.Decaux <- get_map(c(lon=2.35,lat=48.86), zoom =12,  maptype = "roadmap")
+ggmap(map.Decaux)
+map.Decaux <- ggmap(map.Decaux, extent = "device")
+map.Decaux + geom_point(data = tab_heure_graph, aes(x = longitude, y = latitude))
+map.Decaux + geom_point(
+  data = tab_heure_graph, aes(x = longitude,
+                              y = latitude,color=factor(tab_heure_graph$classe)
+  ))+
+  scale_colour_manual(
+    values = c("1" = "red","2" = "blue","3" = "green","4"="orange"))
+
+
